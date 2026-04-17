@@ -10,7 +10,7 @@ etl:
   image:
     repository: ghcr.io/thanghoang-pexon/etl-by-claude/etl-nba
     # Wird von GitHub Actions automatisch auf den neuen Commit-SHA gesetzt
-    tag: latest
+    tag: main-8dc456a
   pullPolicy: Always
   # Welche Pipeline soll laufen? Muss in src/pipelines/__init__.py registriert sein.
   pipeline: nba_stats
