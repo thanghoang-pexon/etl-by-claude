@@ -688,4 +688,133 @@ Alternativ: `imagePullSecret` in values.yaml konfigurieren (für private Registr
 
 ---
 
+## Der vollständige Flow — Gesamtüberblick
+
+### Wie wird die Pipeline getriggert?
+
+**Aktuell (Phase 1–4):** Die Pipeline läuft nur wenn Code gepusht wird.
+**Ab Phase 5 (Airflow):** Die Pipeline läuft zeitgesteuert — unabhängig von Code-Änderungen.
+
+Das ist der zentrale Unterschied:
+
+```
+TRIGGER HEUTE:         git push → CI → Image → ArgoCD → K8s Job läuft einmal
+
+TRIGGER AB PHASE 5:   Airflow Scheduler (täglich 06:00) → K8s Job
+                      ODER: Airflow UI → "Trigger DAG" (manuell)
+                      ODER: Airflow REST API → von außen angesteuert
+```
+
+### Was passiert bei einem git push (aktueller vollständiger Flow)?
+
+```
+git push to main
+        │
+        ▼
+┌───────────────────────────────────────────────────────────┐
+│  GITHUB ACTIONS                                           │
+│                                                           │
+│  Job 1: test                                              │
+│  ├─ pytest (16 Tests)                                     │
+│  └─ nur wenn grün → weiter                                │
+│                                                           │
+│  Job 2: build-and-push         (nur auf main)             │
+│  ├─ docker build                                          │
+│  └─ push → ghcr.io :main-abc1234 + :latest               │
+│                                                           │
+│  Job 3: update-ops-repo        (nach Job 2)               │
+│  ├─ values.yaml: tag = main-abc1234                       │
+│  └─ git commit [skip ci] + push                           │
+└───────────────────────────────────────────────────────────┘
+        │
+        │  values.yaml hat sich geändert
+        ▼
+┌───────────────────────────────────────────────────────────┐
+│  ARGOCD                                                   │
+│  ├─ Erkennt Änderung im GitHub Repo (polling alle 3 Min)  │
+│  ├─ helm upgrade etl-stack                                │
+│  └─ Erstellt neuen Kubernetes Job                         │
+└───────────────────────────────────────────────────────────┘
+        │
+        ▼
+┌───────────────────────────────────────────────────────────┐
+│  KUBERNETES JOB (einmalig, danach fertig)                 │
+│  ├─ init-container: wartet bis Postgres ready             │
+│  ├─ runner.py liest PIPELINE=nba_stats                    │
+│  ├─ NbaStatsPipeline.extract()   → NBA API                │
+│  ├─ NbaStatsPipeline.transform() → Polars                 │
+│  ├─ NbaStatsPipeline.validate()  → DQ-Checks              │
+│  └─ db.load()                    → PostgreSQL (DIH)       │
+└───────────────────────────────────────────────────────────┘
+```
+
+### Wer ist für was zuständig?
+
+| Schicht | Tool | Frage die es beantwortet |
+|---------|------|--------------------------|
+| Code-Qualität | pytest + DQ-Checks | Ist der Code korrekt und die Daten valide? |
+| CI/CD | GitHub Actions | Wie kommt Code als versioniertes Image in die Registry? |
+| Image-Registry | ghcr.io / Harbor | Wo sind alle Image-Versionen gespeichert? |
+| Deployment | ArgoCD + Helm | Welche Version läuft wo im Cluster? |
+| Scheduling | **Airflow** (Phase 5) | Wann läuft die Pipeline? Mit welchen Parametern? |
+| Secrets | .env → Vault (Phase 6) | Wer darf auf welche Credentials zugreifen? |
+| Cloud | Azure (Phase 6) | Wo laufen Datenbank, Registry, Cluster produktiv? |
+
+### Die wichtige Trennung
+
+```
+Code-Änderung  ──────────────►  neues Image bauen  (GitHub Actions)
+                                       ≠
+Neue Daten verfügbar  ──────►  Pipeline ausführen   (Airflow, Phase 5)
+```
+
+Diese Trennung ist der Kern von produktionsreifem Data Engineering.
+Ohne sie läuft die Pipeline nur wenn Entwickler Code schreiben — nicht wenn Daten kommen.
+
+### Neue Pipeline hinzufügen (Plugin-Architektur)
+
+```python
+# 1. Datei anlegen: etl-repository/src/pipelines/weather.py
+class WeatherPipeline(BasePipeline):
+    @property
+    def name(self): return "weather"
+
+    def extract(self): ...      # open-meteo API, CSV, DB — beliebige Quelle
+    def transform(self, df): ... # nur diese Methode ändern sich pro Datensatz
+
+# 2. Registrieren: src/pipelines/__init__.py
+REGISTRY = {
+    "nba_stats": NbaStatsPipeline,
+    "weather":   WeatherPipeline,  # ← das wars
+}
+
+# 3. Deployment: ops-repository/helm/etl-stack/values.yaml
+etl:
+  pipeline: weather  # ← ArgoCD deployed automatisch
+```
+
+---
+
+## Glossar für Non-Techies
+
+| Begriff | Einfach erklärt |
+|---------|-----------------|
+| **ETL** | Extract-Transform-Load: Daten holen, aufbereiten, speichern |
+| **Container** | Eine isolierte, portable "Fertig-Box" für Software |
+| **Docker** | Das Tool zum Bauen und Starten von Containern |
+| **PostgreSQL** | Eine Datenbank — wie Excel, aber für Millionen Zeilen und mehrere User |
+| **API** | Eine Schnittstelle über die Programme miteinander sprechen (hier: NBA Statistiken) |
+| **CI/CD** | Automatisches Testen und Deployen bei jedem Code-Push |
+| **GitOps** | Der Git-Stand ist die einzige "Wahrheit" — was im Repo steht, läuft auch so |
+| **Kubernetes** | Ein System das viele Container verwaltet — startet, überwacht, skaliert sie |
+| **Helm** | Wie ein App-Store für Kubernetes — Pakete mit fertigen Kubernetes-Konfigurationen |
+| **ArgoCD** | Überwacht das Git-Repo und synchronisiert Änderungen automatisch zu Kubernetes |
+| **Airflow** | Ein Scheduler für Datenpipelines — "führe ETL jeden Tag um 6 Uhr aus" |
+| **Harbor** | Eine private Docker-Registry — wie DockerHub, aber auf deinem eigenen Server |
+| **Vault** | Ein Passwort-Safe für Server — speichert Secrets sicher und gibt sie kontrolliert raus |
+| **DAG** | Directed Acyclic Graph — Airflow-Begriff für eine Pipeline mit definierten Schritten |
+| **Plugin-Architektur** | System das durch neue Dateien erweiterbar ist, ohne bestehenden Code zu ändern |
+
+---
+
 *Gebaut mit Claude Code · Schritt für Schritt von lokal bis zur Cloud*
