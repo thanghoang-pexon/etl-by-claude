@@ -1,0 +1,4 @@
+nba_api==1.4.1
+polars==1.30.0
+psycopg[binary]==3.2.4
+python-dotenv==1.0.1
