@@ -294,12 +294,104 @@ docker compose down -v       # Container + Daten löschen
 | Phase | Was | Warum |
 |-------|-----|-------|
 | ✅ **Phase 1** | Lokales Setup | Fundament legen, Pipeline verstehen |
-| 🔜 **Phase 2** | Docker Build & Run | ETL als Container lokal ausführen |
+| ✅ **Phase 2** | Docker Build & Run | ETL als Container lokal ausführen |
 | 🔜 **Phase 3** | GitHub Actions (CI/CD) | Automatisch bauen & testen bei jedem Push |
 | 🔜 **Phase 4** | Harbor (Container Registry) | Container-Images speichern & versionieren |
 | 🔜 **Phase 5** | Kubernetes + Helm | In der Cloud deployen |
 | 🔜 **Phase 6** | ArgoCD (GitOps) | Deployments automatisch aus Git synchronisieren |
 | 🔜 **Phase 7** | Apache Airflow | Pipeline zeitgesteuert & orchestriert ausführen |
+
+---
+
+## Phase 2: Docker Build & Run ✅
+
+Jetzt führen wir den ETL nicht mehr direkt mit Python aus, sondern **als Container** —
+genau so wie es später in der Cloud passieren wird.
+
+### Das Networking-Problem (und die Lösung)
+
+Wenn ein Container läuft, ist er standardmäßig isoliert — er kennt die Außenwelt nicht.
+Unser ETL-Container muss aber mit dem Postgres-Container reden.
+
+```
+❌ Falsch: POSTGRES_HOST=localhost
+   → "localhost" bedeutet innerhalb des Containers: ich selbst
+   → Der ETL findet keine Datenbank
+
+✅ Richtig: POSTGRES_HOST=dih_postgres  + gleiches Docker-Netzwerk
+   → Container kennen sich gegenseitig beim Namen
+   → Verbindung klappt
+```
+
+Docker Compose erstellt automatisch ein **virtuelles Netzwerk** für alle seine Services.
+Wir hängen unseren ETL-Container einfach in dasselbe Netz.
+
+```
+┌─────────────────────────────────────────┐
+│  Docker Netzwerk: etlbyclaude_default   │
+│                                         │
+│  [etl-nba Container] ──► [dih_postgres] │
+│   (unser ETL)               (Datenbank) │
+└─────────────────────────────────────────┘
+```
+
+### Image bauen
+
+```bash
+docker build -t etl-nba:local ./etl-repository
+```
+
+Was passiert hier?
+
+- `docker build` = "Baue ein Image nach dem Bauplan"
+- `-t etl-nba:local` = "Gib ihm den Namen `etl-nba` mit dem Tag `local`"
+- `./etl-repository` = "Der Bauplan (Dockerfile) liegt in diesem Ordner"
+
+**Was ist ein Tag?**
+Tags sind Versionsnummern für Images. `local` bedeutet: mein lokaler Build.
+Später werden wir Tags wie `1.0.0` oder `main-abc1234` (Git-Commit-Hash) verwenden.
+
+### Container starten
+
+```bash
+docker run --rm \
+  --env-file .env \
+  -e POSTGRES_HOST=dih_postgres \
+  --network etlbyclaude_default \
+  etl-nba:local
+```
+
+Zeile für Zeile erklärt:
+
+| Parameter | Bedeutung |
+|-----------|-----------|
+| `--rm` | Container nach dem Laufen automatisch löschen — wir brauchen ihn danach nicht mehr |
+| `--env-file .env` | Alle Variablen aus `.env` in den Container laden |
+| `-e POSTGRES_HOST=dih_postgres` | Eine einzelne Variable überschreiben (Host = Name des Postgres-Containers) |
+| `--network etlbyclaude_default` | In dasselbe Netzwerk wie Postgres einhängen |
+| `etl-nba:local` | Welches Image soll gestartet werden? |
+
+### Warum `--rm`?
+
+ETL-Container sind **kurzlebig** — sie starten, machen ihre Arbeit, hören auf.
+Sie sind kein dauerhaft laufender Service wie Postgres.
+`--rm` sorgt dafür, dass kein Container-Müll liegen bleibt.
+
+### Was haben wir jetzt?
+
+```
+NBA API ──► [etl-nba:local Container] ──► [dih_postgres Container]
+                  (ETL läuft)                   (Datenbank)
+                  ↑
+          docker run startet ihn,
+          docker rm löscht ihn danach
+```
+
+Das ist der **vollständige lokale Pfad** aus der Architektur-Grafik:
+
+```
+ETL-Repository ──► Container (docker build/run) ──► DIH (PostgreSQL)
+```
 
 ---
 
