@@ -1,0 +1,80 @@
+name: CI – Test & Build
+
+# Wann soll diese Pipeline laufen?
+on:
+  push:
+    branches: ["**"]        # bei jedem Push auf jeden Branch
+  pull_request:
+    branches: [main]        # bei Pull Requests nach main
+
+jobs:
+
+  # ─────────────────────────────────────────────
+  # JOB 1: Tests & DQ Checks
+  # Läuft schnell, kein Docker nötig
+  # ─────────────────────────────────────────────
+  test:
+    name: Run Tests & DQ Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: etl-repository/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r etl-repository/requirements.txt
+
+      - name: Run tests
+        working-directory: etl-repository
+        run: pytest -v
+
+  # ─────────────────────────────────────────────
+  # JOB 2: Docker Build & Push
+  # Läuft nur auf main, nur wenn Tests grün sind
+  # ─────────────────────────────────────────────
+  build-and-push:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    needs: test                          # ← wartet auf Job 1
+    if: github.ref == 'refs/heads/main'  # ← nur auf main Branch
+
+    permissions:
+      contents: read
+      packages: write                    # ← nötig um nach ghcr.io zu pushen
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}  # ← automatisch von GitHub gesetzt
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}/etl-nba
+          tags: |
+            type=sha,prefix=main-          # z.B. main-abc1234
+            type=raw,value=latest          # immer auch als "latest" taggen
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: etl-repository
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha        # GitHub Actions Cache nutzen → schnellere Builds
+          cache-to: type=gha,mode=max

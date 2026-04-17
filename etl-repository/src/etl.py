@@ -1,9 +1,11 @@
 import os
+import sys
 import time
 import polars as pl
 import psycopg
 from dotenv import load_dotenv
 from nba_api.stats.endpoints import leagueleaders
+from validate import validate
 
 load_dotenv()
 
@@ -112,5 +114,11 @@ def load(df: pl.DataFrame) -> None:
 if __name__ == "__main__":
     raw = extract()
     transformed = transform(raw)
+
+    result = validate(transformed)
+    print(result)
+    if not result.passed:
+        sys.exit(1)
+
     load(transformed)
     print("[DONE] ETL pipeline completed successfully.")

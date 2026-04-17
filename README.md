@@ -295,7 +295,7 @@ docker compose down -v       # Container + Daten löschen
 |-------|-----|-------|
 | ✅ **Phase 1** | Lokales Setup | Fundament legen, Pipeline verstehen |
 | ✅ **Phase 2** | Docker Build & Run | ETL als Container lokal ausführen |
-| 🔜 **Phase 3** | GitHub Actions (CI/CD) | Automatisch bauen & testen bei jedem Push |
+| ✅ **Phase 3** | GitHub Actions (CI/CD) | Automatisch bauen & testen bei jedem Push |
 | 🔜 **Phase 4** | Harbor (Container Registry) | Container-Images speichern & versionieren |
 | 🔜 **Phase 5** | Kubernetes + Helm | In der Cloud deployen |
 | 🔜 **Phase 6** | ArgoCD (GitOps) | Deployments automatisch aus Git synchronisieren |
@@ -392,6 +392,91 @@ Das ist der **vollständige lokale Pfad** aus der Architektur-Grafik:
 ```
 ETL-Repository ──► Container (docker build/run) ──► DIH (PostgreSQL)
 ```
+
+---
+
+## Phase 3: CI/CD mit GitHub Actions ✅
+
+Ab jetzt übernimmt GitHub die Arbeit. Jeder `git push` startet automatisch eine Pipeline.
+
+### Was ist CI/CD?
+
+| Begriff | Bedeutung | Beispiel hier |
+|---------|-----------|---------------|
+| **CI** – Continuous Integration | Jede Code-Änderung wird sofort automatisch getestet | Tests + DQ Checks laufen bei jedem Push |
+| **CD** – Continuous Delivery | Gebaute Artefakte werden automatisch bereitgestellt | Docker Image landet in der Registry |
+
+**Ohne CI/CD:** Du schreibst Code → du musst daran denken tests zu laufen → du baust das Image manuell → du pushst es irgendwo hin.
+
+**Mit CI/CD:** Du schreibst Code → `git push` → alles andere passiert automatisch.
+
+### Die Pipeline erklärt (`.github/workflows/ci.yml`)
+
+```
+git push
+    │
+    ▼
+┌─────────────────────────────────────┐
+│  JOB 1: test                        │
+│  ├── Python 3.12 installieren       │
+│  ├── Dependencies installieren      │
+│  └── pytest -v (13 Tests)           │
+│       ↓ nur wenn grün               │
+└─────────────────────────────────────┘
+    │ needs: test
+    ▼ (nur auf main Branch)
+┌─────────────────────────────────────┐
+│  JOB 2: build-and-push              │
+│  ├── Login zu ghcr.io               │
+│  ├── docker build                   │
+│  └── docker push → ghcr.io/...     │
+│       Tag: main-abc1234 + latest    │
+└─────────────────────────────────────┘
+```
+
+**Wichtige Prinzipien:**
+
+**`needs: test`** — Job 2 wartet auf Job 1. Wenn Tests fehlschlagen, wird **kein** Image gebaut.
+Das verhindert, dass kaputte Software in die Registry gelangt.
+
+**`if: github.ref == 'refs/heads/main'`** — Images werden nur von `main` gebaut.
+Feature-Branches laufen nur die Tests, bauen aber kein Image. Spart Registry-Speicher.
+
+**`GITHUB_TOKEN`** — GitHub stellt automatisch ein temporäres Token bereit, das nur für
+diesen Pipeline-Lauf gültig ist. Du musst kein Passwort hinterlegen.
+
+### Was ist die GitHub Container Registry (ghcr.io)?
+
+Eine Container-Registry ist ein Lager für Docker-Images — wie npm für JavaScript-Pakete
+oder PyPI für Python-Pakete, nur eben für Container.
+
+```
+ghcr.io/thanghoang-pexon/etl-by-claude/etl-nba:main-abc1234
+│        │                              │        │
+Registry  GitHub-User                  Image    Version (Git-SHA)
+```
+
+**Warum Git-SHA als Tag?**
+Jeder Commit hat einen eindeutigen Hash (z.B. `abc1234`). Wenn ein Image mit diesem
+Tag gebaut wird, kannst du jederzeit exakt nachvollziehen welcher Code darin steckt.
+Das ist die Grundlage für **reproduzierbare Deployments**.
+
+### Data Quality Checks im ETL
+
+Zwischen Transform und Load läuft jetzt eine `validate()` Funktion:
+
+```python
+# src/validate.py — was wird geprüft?
+✓ Mindestens 100 Spieler (Vollständigkeit)
+✓ Keine doppelten player_ids (Eindeutigkeit)
+✓ Keine Nullwerte in Pflichtfeldern (Vollständigkeit)
+✓ Punkte ≥ 0 (Wertebereich)
+✓ Prozentwerte zwischen 0 und 1 (Wertebereich)
+✓ Efficiency Score berechnet (Berechnungsqualität)
+```
+
+Wenn ein Check fehlschlägt: Pipeline stoppt, **keine** Daten landen in der Datenbank.
+Das ist das "fail fast" Prinzip — lieber früh einen Fehler werfen als falsche Daten speichern.
 
 ---
 
