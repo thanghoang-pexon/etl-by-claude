@@ -1,0 +1,30 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: etl-stack
+  namespace: argocd
+  # Beim Löschen der Application auch alle K8s-Ressourcen löschen
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+
+  # Quelle: unser GitHub Repo, Pfad zum Helm Chart
+  source:
+    repoURL: https://github.com/thanghoang-pexon/etl-by-claude.git
+    targetRevision: main
+    path: ops-repository/helm/etl-stack
+
+  # Ziel: lokaler Cluster, eigener Namespace
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: etl
+
+  syncPolicy:
+    # Namespace automatisch erstellen falls nicht vorhanden
+    syncOptions:
+      - CreateNamespace=true
+    automated:
+      # Automatisch synchen wenn GitHub Repo sich ändert
+      selfHeal: true   # ArgoCD korrigiert manuelle Änderungen am Cluster
+      prune: true      # Ressourcen löschen die nicht mehr im Repo sind

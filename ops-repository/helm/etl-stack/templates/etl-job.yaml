@@ -1,0 +1,43 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  # Eindeutiger Name pro Deployment (damit ArgoCD jedes Mal einen neuen Job anlegt)
+  name: etl-nba-{{ .Values.etl.image.tag | replace ":" "-" | trunc 40 }}
+  labels:
+    {{- include "etl-stack.labels" . | nindent 4 }}
+  annotations:
+    # ArgoCD: Job nicht löschen wenn er erfolgreich war
+    argocd.argoproj.io/hook: Sync
+    argocd.argoproj.io/hook-delete-policy: HookSucceeded
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: etl-nba
+    spec:
+      restartPolicy: Never
+      initContainers:
+        # Warte bis Postgres bereit ist, bevor ETL startet
+        - name: wait-for-postgres
+          image: busybox
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z postgres 5432; do
+                echo "Warte auf Postgres..."; sleep 2
+              done
+              echo "Postgres ist bereit."
+      containers:
+        - name: etl
+          image: {{ .Values.etl.image.repository }}:{{ .Values.etl.image.tag }}
+          imagePullPolicy: {{ .Values.etl.pullPolicy }}
+          env:
+            - name: POSTGRES_HOST
+              value: postgres
+            - name: POSTGRES_PORT
+              value: "5432"
+          envFrom:
+            - secretRef:
+                name: postgres-secret

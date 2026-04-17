@@ -1,0 +1,18 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: etl-cluster
+
+nodes:
+  - role: control-plane
+    # Harbor NodePort rausreichen (für Web-UI im Browser)
+    extraPortMappings:
+      - containerPort: 30080
+        hostPort: 30080
+        protocol: TCP
+
+# Lokale Registry als Mirror konfigurieren:
+# "localhost:5001" von außen → "kind-registry:5000" innerhalb des Clusters
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry.mirrors."localhost:5001"]
+      endpoint = ["http://kind-registry:5000"]

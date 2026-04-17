@@ -296,10 +296,9 @@ docker compose down -v       # Container + Daten löschen
 | ✅ **Phase 1** | Lokales Setup | Fundament legen, Pipeline verstehen |
 | ✅ **Phase 2** | Docker Build & Run | ETL als Container lokal ausführen |
 | ✅ **Phase 3** | GitHub Actions (CI/CD) | Automatisch bauen & testen bei jedem Push |
-| 🔜 **Phase 4** | Harbor (Container Registry) | Container-Images speichern & versionieren |
-| 🔜 **Phase 5** | Kubernetes + Helm | In der Cloud deployen |
-| 🔜 **Phase 6** | ArgoCD (GitOps) | Deployments automatisch aus Git synchronisieren |
-| 🔜 **Phase 7** | Apache Airflow | Pipeline zeitgesteuert & orchestriert ausführen |
+| ✅ **Phase 4** | Harbor + Helm + ArgoCD | GitOps: Registry, Charts, automatisches Deployment |
+| 🔜 **Phase 5** | Apache Airflow | Pipeline zeitgesteuert & orchestriert ausführen |
+| 🔜 **Phase 6** | Azure Migration | Storage, Registry, Secrets in die Cloud |
 
 ---
 
@@ -477,6 +476,195 @@ Zwischen Transform und Load läuft jetzt eine `validate()` Funktion:
 
 Wenn ein Check fehlschlägt: Pipeline stoppt, **keine** Daten landen in der Datenbank.
 Das ist das "fail fast" Prinzip — lieber früh einen Fehler werfen als falsche Daten speichern.
+
+---
+
+## Phase 4: Harbor + Helm + ArgoCD ✅
+
+Das ist der Kern des GitOps-Stacks. Drei neue Werkzeuge — jedes mit einer klaren Aufgabe.
+
+---
+
+### Was ist Helm?
+
+Stell dir vor, du willst PostgreSQL in Kubernetes deployen. Das sind allein schon ~5 YAML-Dateien
+(Deployment, Service, PVC, Secret, ConfigMap). Wenn du das für 10 verschiedene Umgebungen brauchst
+(dev, staging, prod), kopierst du diese Dateien 10 Mal — mit kleinen Unterschieden überall.
+
+**Helm löst das:** Ein **Helm Chart** ist eine parametrisierbare Vorlage.
+
+```
+helm install mein-etl ./ops-repository/helm/etl-stack \
+  --set postgres.password=geheim \
+  --set etl.image.tag=v1.2.3
+```
+
+```
+ops-repository/helm/etl-stack/
+├── Chart.yaml        ← Name, Version, Beschreibung
+├── values.yaml       ← Standardwerte (überschreibbar per --set oder -f)
+└── templates/        ← YAML-Vorlagen mit {{ .Values.xxx }} Platzhaltern
+    ├── postgres-deployment.yaml
+    ├── postgres-service.yaml
+    ├── postgres-pvc.yaml
+    ├── postgres-secret.yaml
+    └── etl-job.yaml   ← ETL läuft als Kubernetes Job (einmalig, kein Dauerbetrieb)
+```
+
+**Warum `Job` statt `Deployment`?**
+Ein `Deployment` hält Pods dauerhaft am Laufen (z.B. ein Webserver).
+Ein `Job` startet, führt eine Aufgabe aus, und endet — perfekt für ETL.
+Später steuert Airflow wann dieser Job läuft.
+
+---
+
+### Was ist Harbor?
+
+Harbor ist eine **private Container-Registry** — wie DockerHub, aber auf deinem eigenen Server.
+
+| Feature | DockerHub | ghcr.io | Harbor |
+|---------|-----------|---------|--------|
+| Kostenlos | ✓ (eingeschränkt) | ✓ | Self-hosted |
+| Privat | ✓ (kostenpflichtig) | ✓ | ✓ |
+| Web-UI | ✓ | minimal | ✓ vollständig |
+| Vulnerability Scanning | ✗ | ✗ | ✓ (Trivy) |
+| RBAC | ✗ | ✗ | ✓ |
+| Replication | ✗ | ✗ | ✓ |
+
+```
+Installation via Helm (1 Befehl, ~8 Services werden gestartet):
+
+helm repo add harbor https://helm.goharbor.io
+helm install harbor harbor/harbor \
+  --namespace harbor --create-namespace \
+  --set expose.type=nodePort \
+  --set expose.tls.enabled=false \
+  --set expose.nodePort.ports.http.nodePort=30080 \
+  --set externalURL=http://$(minikube ip):30080 \
+  --set harborAdminPassword=Harbor12345 \
+  --set persistence.enabled=false
+```
+
+**Harbor Web-UI:** `http://$(minikube ip):30080` · User: `admin` · PW: `Harbor12345`
+
+---
+
+### Was ist ArgoCD?
+
+ArgoCD ist ein **GitOps-Operator** — er lebt im Cluster und überwacht dein Git-Repo.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  Ohne GitOps:                                           │
+│  Du → kubectl apply → Cluster                          │
+│  Problem: Wer hat wann was deployed? Undokumentiert.   │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│  Mit GitOps (ArgoCD):                                   │
+│  Du → git push → GitHub → ArgoCD erkennt Änderung      │
+│                          → kubectl apply (automatisch) │
+│  Vorteil: Git = einzige Quelle der Wahrheit             │
+└─────────────────────────────────────────────────────────┘
+```
+
+**ArgoCD Application** (in `ops-repository/argocd/application.yaml`):
+```yaml
+source:
+  repoURL: https://github.com/thanghoang-pexon/etl-by-claude.git
+  path: ops-repository/helm/etl-stack   # ← diesen Pfad überwachen
+
+destination:
+  namespace: etl                         # ← hier deployen
+
+syncPolicy:
+  automated:
+    selfHeal: true   # manuelle kubectl-Änderungen werden zurückgesetzt
+    prune: true      # gelöschte Ressourcen im Repo = gelöscht im Cluster
+```
+
+---
+
+### Der vollständige GitOps-Flow
+
+```
+1. Du schreibst ETL-Code
+       │
+       ▼
+2. git push → GitHub
+       │
+       ▼
+3. GitHub Actions:
+   ├── Tests laufen (pytest)
+   ├── Docker Image wird gebaut
+   ├── Image nach ghcr.io gepusht (Tag: main-abc1234)
+   └── values.yaml wird automatisch aktualisiert:
+       tag: main-abc1234   [skip ci]
+       └─► git commit + push
+       │
+       ▼
+4. ArgoCD erkennt Änderung in ops-repository/helm/etl-stack/values.yaml
+       │
+       ▼
+5. ArgoCD deployed automatisch:
+   ├── PostgreSQL läuft als Deployment im Namespace "etl"
+   └── ETL Job startet mit dem neuen Image
+       │
+       ▼
+6. Daten landen in PostgreSQL (DIH)
+```
+
+**Das Elegante:** Du musst nach `git push` nichts mehr tun.
+Der gesamte Weg vom Code bis zur laufenden Pipeline ist automatisiert.
+
+---
+
+### Setup ausführen
+
+```bash
+# 1. Cluster (minikube bereits laufend)
+kubectl cluster-info
+
+# 2. ArgoCD installieren
+kubectl create namespace argocd
+kubectl apply -n argocd -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+
+# 3. Harbor installieren
+helm repo add harbor https://helm.goharbor.io
+helm install harbor harbor/harbor --namespace harbor --create-namespace \
+  --set expose.type=nodePort --set expose.tls.enabled=false \
+  --set expose.nodePort.ports.http.nodePort=30080 \
+  --set externalURL=http://$(minikube ip):30080 \
+  --set harborAdminPassword=Harbor12345 --set persistence.enabled=false
+
+# 4. ArgoCD Application deployen
+kubectl apply -f ops-repository/argocd/application.yaml
+
+# 5. UIs öffnen
+bash scripts/open-uis.sh
+```
+
+### UIs
+
+| Tool | URL | User | Passwort |
+|------|-----|------|----------|
+| ArgoCD | http://localhost:8080 | admin | `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" \| base64 -d` |
+| Harbor | http://$(minikube ip):30080 | admin | Harbor12345 |
+
+### Image für lokales Testing laden (ohne CI)
+
+```bash
+bash scripts/load-local-image.sh
+# Baut Image lokal, lädt es in minikube, setzt values.yaml auf lokales Image
+```
+
+### ⚠️ Wichtig: ghcr.io Package öffentlich machen
+
+Damit ArgoCD/Kubernetes das Image von ghcr.io pullen kann ohne Credentials:
+1. GitHub → Dein Profil → Packages → `etl-nba` → Package Settings
+2. "Change visibility" → Public
+
+Alternativ: `imagePullSecret` in values.yaml konfigurieren (für private Registries).
 
 ---
 

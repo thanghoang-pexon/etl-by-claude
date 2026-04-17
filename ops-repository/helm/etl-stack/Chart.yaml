@@ -1,0 +1,6 @@
+apiVersion: v2
+name: etl-stack
+description: NBA ETL Pipeline – PostgreSQL + ETL Job
+type: application
+version: 0.1.0
+appVersion: "1.0.0"

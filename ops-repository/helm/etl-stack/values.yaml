@@ -1,0 +1,14 @@
+postgres:
+  image: postgres:16-alpine
+  database: nba_dih
+  user: etl_user
+  # In Produktion: aus Vault/Secret Manager holen
+  password: etl_password
+  storage: 1Gi
+
+etl:
+  image:
+    repository: ghcr.io/thanghoang-pexon/etl-by-claude/etl-nba
+    # Wird von GitHub Actions automatisch auf den neuen Commit-SHA gesetzt
+    tag: latest
+  pullPolicy: Always
