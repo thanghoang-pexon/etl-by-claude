@@ -616,6 +616,9 @@ TestRegistry  (3 Tests)
 | ArgoCD Application "Unknown" Status | Image auf ghcr.io privat | Package auf ghcr.io öffentlich setzen |
 | GitHub Actions Loop durch ci-commit | [skip ci] vergessen | Commit-Message mit `[skip ci]` endet |
 | `polars.write_database` braucht pandas | Polars SQLAlchemy-Backend | psycopg3 direkt mit `executemany` nutzen |
+| GitHub Actions: `buildx failed` | GHA Cache-Backend nicht konfiguriert | `cache-from/cache-to` Zeilen aus `ci.yml` entfernen |
+| ETL-Pod Exit Code 139 in K8s | CI baut nur `amd64`, minikube auf Apple Silicon = `arm64` | `platforms: linux/amd64,linux/arm64` + `setup-qemu-action` in `ci.yml` |
+| Airflow DAG `is_paused=True` | Neue DAGs werden automatisch pausiert | `airflow dags unpause <dag_id>` oder in der UI aktivieren |
 
 ---
 
@@ -642,65 +645,135 @@ TestRegistry  (3 Tests)
 | 3 | ✅ | CI/CD | GitHub Actions, ghcr.io |
 | 4 | ✅ | GitOps: Registry + Deployment + Scheduling-Vorbereitung | Harbor, Helm, ArgoCD, minikube |
 | 4.5 | ✅ | Plugin-Architektur | BasePipeline, Registry, runner.py |
-| 5 | 🔜 | Scheduling | Apache Airflow, KubernetesExecutor, DAGs |
+| 5 | ✅ | Scheduling | Apache Airflow, KubernetesExecutor, DAGs, git-sync |
 | 6 | 🔜 | Secrets | HashiCorp Vault |
 | 7 | 🔜 | Azure Migration | AKS, Azure Container Registry, Azure PostgreSQL |
 
 ---
 
-## Phase 5 Vorschau: Airflow
+## Phase 5: Apache Airflow ✅
 
 ### Was Airflow löst
 
 ```
-Problem jetzt:    Pipeline läuft nur bei git push (Code-Änderung)
+Problem vorher:   Pipeline läuft nur bei git push (Code-Änderung)
 Lösung Airflow:   Pipeline läuft täglich 06:00 — unabhängig von Code
 ```
 
-### Scheduling-Repository Struktur (wird in Phase 5 angelegt)
+### Scheduling-Repository Struktur
 
 ```
 scheduling-repository/
-├── dags/
-│   └── nba_pipeline_dag.py    ← DAG: täglich 06:00, PIPELINE=nba_stats
-└── Dockerfile                 ← Image das die DAGs enthält
+└── dags/
+    └── nba_pipeline_dag.py    ← DAG: täglich 06:00, KubernetesPodOperator
 ```
 
-### DAG-Konzept
-
-```python
-# dags/nba_pipeline_dag.py
-from airflow import DAG
-from airflow.providers.cncf.kubernetes.operators.job import KubernetesJobOperator
-from datetime import datetime
-
-with DAG("nba_pipeline", schedule="0 6 * * *", start_date=datetime(2025,1,1)) as dag:
-    KubernetesJobOperator(
-        task_id="run_etl",
-        image="ghcr.io/thanghoang-pexon/etl-by-claude/etl-nba:latest",
-        env_vars={"PIPELINE": "nba_stats"},
-        # Postgres-Credentials aus K8s Secret
-    )
-```
-
-### Airflow Deployment via Helm
+### Installationsschritte
 
 ```bash
-helm repo add apache-airflow https://airflow.apache.org
-helm install airflow apache-airflow/airflow \
-  --namespace airflow --create-namespace \
-  --set executor=KubernetesExecutor \
-  --set dags.gitSync.enabled=true \
-  --set dags.gitSync.repo=https://github.com/thanghoang-pexon/etl-by-claude.git \
-  --set dags.gitSync.branch=main \
-  --set dags.gitSync.subPath=scheduling-repository/dags
+# 1. Airflow-Metadaten-Postgres anlegen (eigene StatefulSet, NICHT Bitnami)
+kubectl apply -f ops-repository/k8s/airflow-meta-postgres.yaml
+
+# 2. ETL-Postgres-Secret im airflow Namespace anlegen
+#    (ETL-Pods brauchen Zugriff auf postgres.etl.svc.cluster.local)
+kubectl apply -f ops-repository/k8s/etl-postgres-secret-airflow.yaml
+
+# 3. Airflow via Helm + ArgoCD deployen
+kubectl apply -f ops-repository/argocd/airflow-application.yaml
+# → ArgoCD deployed apache-airflow Chart 1.16.0 (= Airflow 2.10.5)
+#   mit values aus ops-repository/helm/airflow-values.yaml
+
+# 4. DAG unpausen und triggern
+kubectl exec -n airflow deploy/airflow-scheduler -c scheduler -- \
+  airflow dags unpause nba_stats_pipeline
+kubectl exec -n airflow deploy/airflow-scheduler -c scheduler -- \
+  airflow dags trigger nba_stats_pipeline
+
+# 5. UI öffnen
+kubectl port-forward svc/airflow-webserver -n airflow 8081:8080
+# → http://localhost:8081  ·  admin / admin123
 ```
 
-**KubernetesExecutor:** Jeder DAG-Task erstellt einen eigenen K8s Pod.
-Perfekt für ETL: isoliert, skalierbar, keine dauerhaften Worker-Prozesse.
+### Kritische Konfigurationen
 
-**git-sync:** Airflow lädt DAGs direkt aus GitHub — kein manuelles Kopieren.
-Neuer DAG = git push → Airflow erkennt ihn automatisch.
+**`ops-repository/helm/airflow-values.yaml`:**
+```yaml
+airflowVersion: "2.10.5"
+executor: KubernetesExecutor      # kein dauerhafter Worker, jeder Task = eigener Pod
+dags:
+  gitSync:
+    enabled: true
+    repo: https://github.com/thanghoang-pexon/etl-by-claude.git
+    branch: main
+    subPath: scheduling-repository/dags
+    period: 60s                   # alle 60s von GitHub pullen
+postgresql:
+  enabled: false                  # eigene postgres:16-alpine statt Bitnami verwenden
+data:
+  metadataConnection:
+    host: airflow-postgres.airflow.svc.cluster.local
+```
+
+**`ops-repository/argocd/airflow-application.yaml`:**
+```yaml
+# Multi-Source: official chart + eigene values
+sources:
+  - repoURL: https://airflow.apache.org
+    chart: airflow
+    targetRevision: 1.16.0        # WICHTIG: 1.20.0 wäre Airflow 3.x — breaking changes!
+    helm:
+      valueFiles: [$values/ops-repository/helm/airflow-values.yaml]
+  - repoURL: https://github.com/thanghoang-pexon/etl-by-claude.git
+    targetRevision: main
+    ref: values
+syncPolicy:
+  syncOptions: [CreateNamespace=true]
+  automated:
+    prune: false                  # WICHTIG: Airflow-Metadaten-DB schützen
+```
+
+**`scheduling-repository/dags/nba_pipeline_dag.py`:**
+```python
+run_nba_etl = KubernetesPodOperator(
+    task_id="run_nba_etl",
+    name="nba-etl",
+    random_name_suffix=True,      # WICHTIG: kein Jinja-Template im name-Feld!
+    namespace="airflow",
+    image="ghcr.io/thanghoang-pexon/etl-by-claude/etl-nba:latest",
+    env_vars=[
+        V1EnvVar(name="PIPELINE", value="nba_stats"),
+        # POSTGRES_HOST=postgres.etl.svc.cluster.local  (Cross-Namespace DNS!)
+        # POSTGRES_DB, USER, PASSWORD aus Secret "etl-postgres-credentials"
+    ],
+    is_delete_operator_pod=True,
+)
+```
+
+### Bekannte Probleme Phase 5
+
+| Problem | Ursache | Lösung |
+|---------|---------|--------|
+| `bitnami/postgresql` ImagePullBackOff | Bitnami-Tag nicht mehr auf Docker Hub | Eigene `airflow-meta-postgres.yaml` mit `postgres:16-alpine` |
+| Airflow Chart 1.20.0 = Airflow 3.x | Breaking Changes | Pinnen auf Chart 1.16.0 = Airflow 2.10.5 |
+| DAG ImportError: ungültiger Pod-Name | `name="nba-etl-{{ ds_nodash }}"` — Jinja wird beim Parse validiert | `name="nba-etl"` + `random_name_suffix=True` |
+| ETL-Pod: Exit Code 139 (Segfault) | CI baut `linux/amd64`, minikube auf Apple Silicon braucht `arm64` | `platforms: linux/amd64,linux/arm64` in `ci.yml` + `docker/setup-qemu-action` |
+| DAG is_paused=True nach erstem Import | Airflow pausiert neue DAGs standardmäßig | `airflow dags unpause nba_stats_pipeline` |
+
+### Ergebnis
+
+```bash
+# Daten in Postgres nach erfolgreichem Run:
+kubectl exec -n etl deploy/postgres -- \
+  psql -U etl_user -d nba_dih \
+  -c "SELECT player, team, pts, efficiency_score FROM nba_player_stats ORDER BY efficiency_score DESC LIMIT 5;"
+
+#          player          | team | pts  | efficiency_score
+# Nikola Jokić             | DEN  | 29.6 | 61.64
+# Giannis Antetokounmpo    | MIL  | 30.4 | 55.53
+# Shai Gilgeous-Alexander  | OKC  | 32.7 | 51.30
+# Jayson Tatum             | BOS  | 26.8 | 46.54
+# Cade Cunningham          | DET  | 26.1 | 46.27
+```
 
 ---
 
@@ -724,4 +797,4 @@ fix: Bugfix
 ---
 
 *Dieses Dokument wird mit jeder Phase aktualisiert.*
-*Zuletzt aktualisiert: Phase 4.5 — Plugin-Architektur*
+*Zuletzt aktualisiert: Phase 5 — Apache Airflow vollständig deployed und verifiziert*

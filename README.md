@@ -1105,10 +1105,10 @@ Ein GitHub-Actions-Workflow lässt sich in ~30 Minuten zu GitLab CI migrieren.
 
 | Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
 |---------|---------------|----------------|---------------|
-| **(geplant) Airflow** | Marktführer, K8s-nativ | **Prefect** | Moderner Python-First, bessere UX |
-| **(geplant) Airflow** | Open Source | **Dagster** | Asset-basiertes Denken, starkes Lineage-Feature |
-| **(geplant) Airflow** | Self-hosted | **Azure Data Factory** | Managed, No-Code-Pipelines für Azure-Ökosystem |
-| **(geplant) Airflow** | Flexibel | **AWS Glue** | Managed Spark-Jobs auf AWS |
+| **Apache Airflow** | Marktführer, K8s-nativ | **Prefect** | Moderner Python-First, bessere UX |
+| **Apache Airflow** | Open Source | **Dagster** | Asset-basiertes Denken, starkes Lineage-Feature |
+| **Apache Airflow** | Self-hosted | **Azure Data Factory** | Managed, No-Code-Pipelines für Azure-Ökosystem |
+| **Apache Airflow** | Flexibel | **AWS Glue** | Managed Spark-Jobs auf AWS |
 
 ---
 
