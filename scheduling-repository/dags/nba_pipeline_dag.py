@@ -69,7 +69,8 @@ with DAG(
     # ── Task 1: NBA Stats ETL ─────────────────────────────────────────────────
     run_nba_etl = KubernetesPodOperator(
         task_id="run_nba_etl",
-        name="nba-etl-{{ ds_nodash }}",   # eindeutiger Pod-Name pro Execution Date
+        name="nba-etl",
+        random_name_suffix=True,          # Airflow hängt zufälligen Suffix an → eindeutiger Pod-Name
         namespace="airflow",
         image=ETL_IMAGE,
         image_pull_policy="Always",
