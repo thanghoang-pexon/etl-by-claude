@@ -1,0 +1,75 @@
+# Apache Airflow Helm Chart — Werte für lokalen Stack
+# Offizielle Chart-Doku: https://airflow.apache.org/docs/helm-chart/
+
+airflowVersion: "2.10.5"
+
+# KubernetesExecutor: jeder Task bekommt seinen eigenen Pod
+# → Isolation, keine dauerhaften Worker-Prozesse, perfekt für ETL
+executor: KubernetesExecutor
+
+# ── DAG-Synchronisation via git-sync ─────────────────────────────────────────
+# Airflow zieht DAGs automatisch aus GitHub — kein manuelles Kopieren
+# Neuer DAG: git push → Airflow erkennt ihn innerhalb von 60 Sekunden
+dags:
+  gitSync:
+    enabled: true
+    repo: https://github.com/thanghoang-pexon/etl-by-claude.git
+    branch: main
+    rev: HEAD
+    depth: 1
+    maxFailures: 3
+    subPath: "scheduling-repository/dags"
+    period: 60s
+
+# ── Airflow-Konfiguration ────────────────────────────────────────────────────
+config:
+  core:
+    load_examples: "False"    # Keine Demo-DAGs laden
+  webserver:
+    expose_config: "True"     # Config in der UI sichtbar (nur lokal!)
+
+# ── Web-UI Admin-User ────────────────────────────────────────────────────────
+webserver:
+  defaultUser:
+    enabled: true
+    role: Admin
+    username: admin
+    email: admin@example.com
+    firstName: Admin
+    lastName: User
+    password: admin123
+  resources:
+    requests: { memory: "512Mi", cpu: "100m" }
+    limits:   { memory: "1Gi",   cpu: "500m" }
+
+scheduler:
+  resources:
+    requests: { memory: "512Mi", cpu: "100m" }
+    limits:   { memory: "1Gi",   cpu: "500m" }
+
+# ── Externe PostgreSQL für Airflow-Metadaten ─────────────────────────────────
+# Wir nutzen unsere eigene postgres:16-alpine (ops-repository/k8s/airflow-meta-postgres.yaml)
+# statt des Bitnami-Charts (veraltete Image-Tags)
+postgresql:
+  enabled: false
+
+data:
+  metadataConnection:
+    user: airflow
+    pass: airflow123
+    host: airflow-postgres.airflow.svc.cluster.local
+    port: 5432
+    db: airflow
+    sslmode: disable
+
+# ── Deaktivierte Komponenten (sparen Ressourcen lokal) ───────────────────────
+flower:
+  enabled: false          # Celery-Monitoring UI — nicht nötig mit KubernetesExecutor
+
+# ── RBAC: Airflow darf Pods erstellen ────────────────────────────────────────
+rbac:
+  create: true
+
+serviceAccount:
+  create: true
+  name: "airflow"

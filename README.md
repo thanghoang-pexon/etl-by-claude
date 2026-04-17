@@ -297,7 +297,7 @@ docker compose down -v       # Container + Daten löschen
 | ✅ **Phase 2** | Docker Build & Run | ETL als Container lokal ausführen |
 | ✅ **Phase 3** | GitHub Actions (CI/CD) | Automatisch bauen & testen bei jedem Push |
 | ✅ **Phase 4** | Harbor + Helm + ArgoCD | GitOps: Registry, Charts, automatisches Deployment |
-| 🔜 **Phase 5** | Apache Airflow | Pipeline zeitgesteuert & orchestriert ausführen |
+| ✅ **Phase 5** | Apache Airflow | Pipeline zeitgesteuert & orchestriert ausführen |
 | 🔜 **Phase 6** | Azure Migration | Storage, Registry, Secrets in die Cloud |
 
 ---
@@ -814,6 +814,168 @@ etl:
 | **Vault** | Ein Passwort-Safe für Server — speichert Secrets sicher und gibt sie kontrolliert raus |
 | **DAG** | Directed Acyclic Graph — Airflow-Begriff für eine Pipeline mit definierten Schritten |
 | **Plugin-Architektur** | System das durch neue Dateien erweiterbar ist, ohne bestehenden Code zu ändern |
+
+---
+
+## Phase 5: Apache Airflow ✅
+
+Airflow ist der **Scheduler und Orchestrator** — das fehlende Stück das Code-Push von Daten-Scheduling trennt.
+
+---
+
+### Das Problem das Airflow löst
+
+```
+Ohne Airflow:   Pipeline läuft nur wenn jemand Code pusht
+Mit Airflow:    Pipeline läuft täglich 06:00 — egal ob jemand Code schreibt
+```
+
+Und noch mehr: Airflow kann **Abhängigkeiten zwischen Pipelines** definieren,
+**Fehler wiederholen**, **historische Runs nachholen**, und alles in einer
+**Web-UI visualisieren**.
+
+---
+
+### Was ist ein DAG?
+
+DAG = **Directed Acyclic Graph** — ein gerichteter, kreisfreier Graph.
+In Airflow-Sprache: eine Pipeline mit definierten Schritten und Abhängigkeiten.
+
+```python
+# scheduling-repository/dags/nba_pipeline_dag.py
+
+with DAG(
+    dag_id="nba_stats_pipeline",
+    schedule="0 6 * * *",       # täglich 06:00 UTC (Cron-Syntax)
+    start_date=datetime(2025, 1, 1),
+    catchup=False,              # keine historischen Runs nachholen
+) as dag:
+
+    run_nba_etl = KubernetesPodOperator(
+        task_id="run_nba_etl",
+        image="ghcr.io/.../etl-nba:latest",
+        env_vars=[
+            V1EnvVar(name="PIPELINE", value="nba_stats"),
+            ...  # Postgres-Credentials aus K8s Secret
+        ],
+        get_logs=True,
+        is_delete_operator_pod=True,  # Pod nach Run löschen
+    )
+```
+
+**Cron-Syntax:** `"0 6 * * *"` = Minute 0, Stunde 6, jeder Tag, jeder Monat, jeder Wochentag.
+
+---
+
+### KubernetesExecutor — warum kein normaler Worker?
+
+```
+Celery/Local Executor:   [Airflow Worker] läuft dauerhaft, wartet auf Tasks
+KubernetesExecutor:      [Airflow Scheduler] erstellt pro Task einen K8s Pod
+                                             → Pod startet, arbeitet, verschwindet
+```
+
+**Vorteile KubernetesExecutor:**
+- Keine dauerhaft laufenden Worker-Prozesse (spart Ressourcen)
+- Jeder Task hat eigene Ressourcen (CPU/Memory) und Isolation
+- Perfekte Skalierung: 0 Tasks = 0 Worker-Pods
+- Passt zur bestehenden K8s-Infrastruktur
+
+---
+
+### git-sync — DAGs automatisch aktuell halten
+
+```
+Airflow Pod
+  ├── airflow-scheduler Container   ← führt DAGs aus
+  └── git-sync Container (Sidecar)  ← zieht alle 60s von GitHub
+        ↓
+        https://github.com/.../scheduling-repository/dags/
+```
+
+**Ergebnis:** Neuen DAG schreiben → `git push` → nach max. 60 Sekunden in Airflow sichtbar.
+Kein Restart, kein Deployment, kein Image-Build nötig.
+
+---
+
+### Der vollständige Flow mit Airflow
+
+```
+Täglich 06:00 UTC
+      │
+      ▼
+Airflow Scheduler erkennt: DAG "nba_stats_pipeline" ist fällig
+      │
+      ▼
+KubernetesExecutor erstellt einen Pod:
+  Image:  ghcr.io/.../etl-nba:latest
+  Env:    PIPELINE=nba_stats
+  Secret: Postgres-Credentials
+      │
+      ▼
+Pod läuft runner.py:
+  extract()   → NBA API
+  transform() → Polars
+  validate()  → DQ-Checks
+  load()      → PostgreSQL (DIH)
+      │
+      ▼
+Pod beendet sich, wird gelöscht
+Airflow markiert Task als "success"
+      │
+      ▼
+Logs in Airflow UI sichtbar (http://localhost:8081)
+```
+
+---
+
+### Neue Pipeline schedulen — 3 Zeilen
+
+```python
+# scheduling-repository/dags/nba_pipeline_dag.py — einfach ergänzen:
+
+run_weather_etl = KubernetesPodOperator(
+    task_id="run_weather_etl",
+    image=ETL_IMAGE,
+    env_vars=[k8s.V1EnvVar(name="PIPELINE", value="weather"), *POSTGRES_ENV],
+    ...
+)
+
+# Parallel zu NBA (kein >> nötig):
+[run_nba_etl, run_weather_etl]
+
+# Oder nacheinander:
+# run_nba_etl >> run_weather_etl
+```
+
+---
+
+### Setup
+
+```bash
+# Airflow installieren
+bash scripts/setup-airflow.sh
+
+# UI öffnen
+kubectl port-forward svc/airflow-webserver -n airflow 8081:8080
+# → http://localhost:8081  ·  User: admin  ·  PW: admin123
+
+# DAG manuell triggern (ohne auf 06:00 warten)
+# Airflow UI → DAGs → nba_stats_pipeline → ▶ Trigger DAG
+
+# Oder via CLI:
+kubectl exec -n airflow deploy/airflow-scheduler -- \
+  airflow dags trigger nba_stats_pipeline
+```
+
+### Projektstruktur (Scheduling-Repository)
+
+```
+scheduling-repository/
+├── dags/
+│   └── nba_pipeline_dag.py   ← DAG-Definition (via git-sync zu Airflow)
+└── Dockerfile                 ← Alternativ: DAGs als Image (Referenz)
+```
 
 ---
 
