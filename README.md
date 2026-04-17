@@ -817,4 +817,179 @@ etl:
 
 ---
 
+## Technologie-Stack & Austausch-Guide
+
+Jede Komponente dieses Stacks ist bewusst austauschbar gehalten.
+Die Tabellen zeigen was wir nutzen, warum — und wann du es ersetzen würdest.
+
+---
+
+### Datenverarbeitung (Transform-Schicht)
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **Polars** | Schnell, modernes API, kein Java | **Pandas** | Wenn viele Bibliotheken Pandas voraussetzen |
+| **Polars** | Läuft auf einem einzelnen Rechner | **PySpark** | Wenn Daten nicht mehr in RAM passen (> 10 GB) |
+| **Polars** | Python-Code, flexibel | **dbt** | Wenn Transformationen SQL-basiert sein sollen und Analysten sie pflegen |
+| **Polars** | Eigene Logik | **DuckDB** | Wenn SQL-Analytik direkt auf Parquet/CSV-Dateien ohne Datenbank nötig |
+
+**Austausch in diesem Projekt:** Nur `transform()` in der jeweiligen Pipeline-Klasse ändern.
+`runner.py`, `db.py` und die gesamte Infrastruktur bleiben unberührt.
+
+```python
+# PySpark-Beispiel — gleiche Schnittstelle, anderer Code
+class NbaSparkPipeline(BasePipeline):
+    def transform(self, df: pl.DataFrame) -> pl.DataFrame:
+        spark_df = spark.createDataFrame(df.to_pandas())
+        spark_df = spark_df.withColumn("efficiency", ...)
+        return pl.from_pandas(spark_df.toPandas())
+```
+
+---
+
+### Verarbeitungsmodus (Batch vs. Streaming)
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **Batch (täglich)** | Einfach, NBA-Daten ändern sich langsam | **Apache Kafka + Flink** | Wenn Daten in Echtzeit fließen (Klick-Events, Sensoren) |
+| **Batch** | Kein Streaming-Overhead | **Azure Event Hubs** | Managed Kafka-Alternative in Azure |
+| **Batch** | Einfach zu debuggen | **Spark Structured Streaming** | Wenn PySpark ohnehin genutzt wird und Near-Realtime reicht |
+
+**Konzept-Unterschied:**
+
+```
+Batch:     [alle Daten] → verarbeiten → Ergebnis  (1x täglich)
+Streaming: Daten fließen → jedes Event sofort verarbeiten → Ergebnis in ms
+```
+
+Für die meisten Data-Engineering-Anwendungsfälle ist Batch die richtige Wahl.
+Streaming ist komplexer, teurer und nur dann nötig wenn Sekunden zählen.
+
+---
+
+### Datenspeicher (Load-Schicht / DIH)
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **PostgreSQL** | Einfach, lokal, kein Vendor-Lock-in | **Azure Database for PostgreSQL** | Managed PostgreSQL in Azure, kein Ops-Aufwand |
+| **PostgreSQL** | Strukturierte Daten, SQL | **Azure Blob Storage** (Data Lake) | Wenn Rohdaten als Parquet/CSV archiviert werden sollen |
+| **PostgreSQL** | Zeilenbasiert | **Azure Synapse Analytics** | Wenn sehr große Mengen für BI-Reports (Spalten-optimiert) |
+| **PostgreSQL** | On-premise | **Snowflake** | Cloud-natives Data Warehouse, einfach zu skalieren |
+| **PostgreSQL** | Einfaches Schema | **Delta Lake** | Wenn ACID-Transaktionen + Versionierung auf dem Data Lake nötig |
+
+**Austausch in diesem Projekt:** Nur `db.py` + `create_table_sql()` in der Pipeline anpassen.
+Die Transformationslogik bleibt komplett unverändert.
+
+```python
+# Azure Blob Storage Beispiel — db.py ersetzen
+def load(df: pl.DataFrame, table_name: str, **_) -> None:
+    from azure.storage.blob import BlobServiceClient
+    client = BlobServiceClient.from_connection_string(os.environ["AZURE_STORAGE_CONN"])
+    blob = client.get_blob_client("etl-data", f"{table_name}.parquet")
+    blob.upload_blob(df.write_parquet(None), overwrite=True)
+```
+
+---
+
+### Container-Registry
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **ghcr.io** | Kostenlos, direkt bei GitHub | **Harbor** (self-hosted) | Wenn RBAC, Vulnerability Scanning, kein Vendor-Lock-in nötig |
+| **ghcr.io** | Einfach für CI | **Azure Container Registry (ACR)** | Wenn Stack auf Azure liegt — nahtlose AKS-Integration |
+| **ghcr.io** | Open | **AWS ECR / GCR** | Bei AWS/GCP-Stack |
+
+**Austausch:** Nur `ci.yml` — Login-Schritt und Image-URL ändern.
+Helm-Chart, ArgoCD, Kubernetes bleiben unverändert.
+
+```yaml
+# ACR statt ghcr.io — nur diese Zeilen in ci.yml ändern:
+- uses: docker/login-action@v3
+  with:
+    registry: myregistry.azurecr.io
+    username: ${{ secrets.ACR_USERNAME }}
+    password: ${{ secrets.ACR_PASSWORD }}
+```
+
+---
+
+### CI/CD
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **GitHub Actions** | Direkt in GitHub, kein Extra-Tool | **GitLab CI** | Wenn das Unternehmen GitLab nutzt (Self-hosted) |
+| **GitHub Actions** | YAML-basiert, einfach | **Azure DevOps Pipelines** | Vollständige Azure-Integration mit Boards, Repos |
+| **GitHub Actions** | Kostenlos für public | **Tekton** | K8s-native CI/CD — alles läuft im Cluster |
+| **GitHub Actions** | Managed | **Jenkins** | Maximale Flexibilität, aber viel Ops-Aufwand |
+
+**Konzept-Transfer:** GitHub Actions und GitLab CI sind fast identisch.
+Ein GitHub-Actions-Workflow lässt sich in ~30 Minuten zu GitLab CI migrieren.
+
+---
+
+### Kubernetes & Deployment
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **minikube** (lokal) | Bereits vorhanden, einfach | **kind** | Leichter, CI-freundlicher (wenn kind-Boot-Probleme gelöst) |
+| **minikube** (lokal) | Für Entwicklung | **Azure AKS** | Produktions-Kubernetes in Azure, managed |
+| **minikube** (lokal) | Lokal | **k3s** | Leichtgewichtig, gut für Edge/IoT |
+| **Helm** | Industrie-Standard | **Kustomize** | Wenn nur YAML-Overlays ohne Templating nötig |
+| **ArgoCD** | Beste UI, weit verbreitet | **Flux CD** | Leichtgewichtiger, kein UI aber GitOps-konform |
+
+---
+
+### Scheduling & Orchestrierung
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **(geplant) Airflow** | Marktführer, K8s-nativ | **Prefect** | Moderner Python-First, bessere UX |
+| **(geplant) Airflow** | Open Source | **Dagster** | Asset-basiertes Denken, starkes Lineage-Feature |
+| **(geplant) Airflow** | Self-hosted | **Azure Data Factory** | Managed, No-Code-Pipelines für Azure-Ökosystem |
+| **(geplant) Airflow** | Flexibel | **AWS Glue** | Managed Spark-Jobs auf AWS |
+
+---
+
+### Secrets Management
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **.env** (lokal) | Einfachst möglich, klar verständlich | **HashiCorp Vault** | Self-hosted, feingranulare Zugriffssteuerung |
+| **.env** (lokal) | Kein Extra-Service | **Azure Key Vault** | Managed, perfekte AKS-Integration über Workload Identity |
+| **.env** (lokal) | Transparent | **K8s Secrets + External Secrets Operator** | Secrets in K8s nativ, aus Vault/Azure Key Vault synchronisiert |
+
+---
+
+### Data Quality
+
+| Aktuell | Warum gewählt | Ersetzen durch | Wann sinnvoll |
+|---------|---------------|----------------|---------------|
+| **Eigene Polars-Checks** | Kein Extra-Dependency, transparent | **Great Expectations** | Wenn DQ-Checks dokumentiert und geteilt werden sollen |
+| **Eigene Checks** | Einfach zu erweitern | **Soda Core** | Wenn DQ-Checks als YAML konfiguriert (nicht code) werden sollen |
+| **Eigene Checks** | Leichtgewichtig | **Pandera** | Schema-Validierung mit Pandas/Polars-Integration |
+| **Eigene Checks** | Manuell definiert | **dbt tests** | Wenn dbt ohnehin für Transformationen genutzt wird |
+
+---
+
+### Übersicht: Austausch-Aufwand
+
+```
+Niedrig (nur 1-2 Dateien ändern):
+  Datenverarbeitung   → transform() in Pipeline-Klasse
+  Datenspeicher       → db.py + create_table_sql()
+  Container-Registry  → ci.yml Login + Image-URL
+
+Mittel (Konfiguration + 1 Service tauschen):
+  CI/CD               → .github/workflows/ → .gitlab-ci.yml
+  Secrets             → .env → Vault → Azure Key Vault
+  Orchestrierung      → Airflow DAG → Prefect Flow
+
+Hoch (Infrastruktur-Änderung):
+  Kubernetes          → minikube → AKS (Cluster neu provisionieren)
+  Batch → Streaming   → Komplettes Pipeline-Pattern ändern
+  SQL → Data Lake     → Storage-Layer + Query-Engine ersetzen
+```
+
+---
+
 *Gebaut mit Claude Code · Schritt für Schritt von lokal bis zur Cloud*
