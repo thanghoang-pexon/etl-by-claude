@@ -34,6 +34,8 @@ spec:
           image: {{ .Values.etl.image.repository }}:{{ .Values.etl.image.tag }}
           imagePullPolicy: {{ .Values.etl.pullPolicy }}
           env:
+            - name: PIPELINE
+              value: {{ .Values.etl.pipeline | quote }}
             - name: POSTGRES_HOST
               value: postgres
             - name: POSTGRES_PORT

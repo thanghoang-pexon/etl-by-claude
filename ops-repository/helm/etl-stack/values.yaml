@@ -12,3 +12,5 @@ etl:
     # Wird von GitHub Actions automatisch auf den neuen Commit-SHA gesetzt
     tag: latest
   pullPolicy: Always
+  # Welche Pipeline soll laufen? Muss in src/pipelines/__init__.py registriert sein.
+  pipeline: nba_stats
